@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.helpers.entity import Entity, DeviceInfo
+from homeassistant.const import CONF_UNIQUE_ID
 from homeassistant.core import callback
+from homeassistant.helpers.entity import Entity, DeviceInfo
 
-from .const import DOMAIN, MAIN_DEVICES
-from .until import formatted_name
+from .util import remove_colon
+from .const import DOMAIN, MAIN_DEVICES, DEVICE_TYPE, ROOM_ID
 
 
 class BestinBase:
@@ -17,36 +18,36 @@ class BestinBase:
     def __init__(self, device, hub):
         """Initialize device and hub."""
         self._device = device
-        self._device_info = device.info
+        self._dev_info = device.dev_info
         self.hub = hub
     
-    async def enqueue_command(self, data: Any = None, **kwargs):
-        """Send commands to the device."""
-        await self._device.enqueue_command(self._device_info.device_id, data, **kwargs)
+    def set_command(self, data: Any = None, **kwargs):
+        """Send command to device."""
+        self._device.set_command(self._device, data, **kwargs)
     
     @property
     def unique_id(self) -> str:
         """Get unique device ID."""
         return self._device.unique_id
-
+    
     @property
     def device_info(self) -> DeviceInfo:
         """Get device registry information."""
-        if (device_type := self._device_info.device_type) not in MAIN_DEVICES:
-            formatted_id = formatted_name(device_type)
-            device_name = f"{self.hub.name} {formatted_id}"
+        if self._dev_info.device_type not in MAIN_DEVICES:
+            device_type = remove_colon(self._dev_info.device_type)
+            device_name = f"{self.hub.name} {device_type}"
         else:
-            formatted_id = self.hub.model
+            device_type = self.hub.model
             device_name = self.hub.name
 
         return DeviceInfo(
-            connections={(self.hub.hub_id, self.unique_id)},
-            identifiers={(DOMAIN, f"{self.hub.wp_version}_{formatted_id}")},
+            connections={(self.hub.host, self.unique_id)},
+            identifiers={(DOMAIN, f"{self.hub.name}_{device_type}_{self.hub.host}")},
             manufacturer="HDC Labs Co., Ltd.",
-            model=self.hub.wp_version,
+            model=self.hub.name,
             name=device_name,
             sw_version=self.hub.sw_version,
-            via_device=(DOMAIN, self.hub.hub_id),
+            via_device=(DOMAIN, self.hub.host),
         )
 
 
@@ -60,7 +61,7 @@ class BestinDevice(BestinBase, Entity):
         super().__init__(device, hub)
         self.hub.entity_groups[self.TYPE].add(self.unique_id)
         self._attr_has_entity_name = True
-        self._attr_name = self._device_info.name
+        self._attr_name = self._dev_info.device_name
 
     @property
     def entity_registry_enabled_default(self):
@@ -70,7 +71,7 @@ class BestinDevice(BestinBase, Entity):
     async def async_added_to_hass(self):
         """Subscribe to device events upon addition to HASS."""
         self._device.add_callback(self.async_update_callback)
-        self.hub.entity_to_id[self.entity_id] = self._device_info.device_id
+        self.hub.entity_to_id[self.entity_id] = self._dev_info.device_id
         self.schedule_update_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
@@ -97,18 +98,14 @@ class BestinDevice(BestinBase, Entity):
     @property
     def should_poll(self) -> bool:
         """Determine if the device requires polling."""
-        return self.hub.is_polling
+        return False
 
     @property
     def extra_state_attributes(self) -> dict:
         """Get additional state attributes."""
         attributes = {
-            "unique_id": self.unique_id,
-            "device_room": self._device_info.room,
-            "device_type": self._device_info.device_type,
+            CONF_UNIQUE_ID: self.unique_id,
+            ROOM_ID: self._dev_info.room_id,
+            DEVICE_TYPE: self._dev_info.device_type,
         }
-        if self.should_poll and not "elevator" in self.entity_id:
-            attributes["last_update_time"] = self.hub.api.last_update_time
-            attributes["last_sess_refresh"] = self.hub.api.last_sess_refresh
-        
         return attributes

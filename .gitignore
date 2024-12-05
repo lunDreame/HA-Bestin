@@ -1,0 +1,4 @@
+.vscode
+.DS_Store
+tests/*.py
+tests/**/*.py

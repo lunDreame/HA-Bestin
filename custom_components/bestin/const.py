@@ -5,48 +5,44 @@ from dataclasses import dataclass, field
 
 from homeassistant.const import Platform
 
+LOGGER = logging.getLogger(__package__)
+
 DOMAIN = "bestin"
 NAME = "BESTIN"
-VERSION = "1.1.7"
+VERSION = "1.2.0"
 
 PLATFORMS: list[Platform] = [
     Platform.CLIMATE,
+    Platform.NUMBER,
     Platform.FAN,
     Platform.LIGHT,
     Platform.SENSOR,
     Platform.SWITCH,
 ]
 
-LOGGER = logging.getLogger(__package__)
-
-CONF_VERSION = "version"
-CONF_VERSION_1 = "version1.0"
-CONF_VERSION_2 = "version2.0"
-CONF_SESSION = "session"
-
 DEFAULT_PORT = 8899
-DEFAULT_MAX_SEND_RETRY = 10
-DEFAULT_PACKET_VIEWER = False
 
-DEFAULT_SCAN_INTERVAL = 30
+EC_TYPE = "ec_type"
 
-SMART_HOME_1 = "Smart Home 1.0"
-SMART_HOME_2 = "Smart Home 2.0"
+SEND_RETRY = "send_retry"
+DEVICE_TYPE = "device_type"
+SUB_TYPE = "sub_type"
+ROOM_ID = "room_id"
+SUB_ID = "sub_id"
+VALUE = "value"
+SEQ_NUMBER = "seq_number"
 
-SPEED_INT_LOW = 1
-SPEED_INT_MEDIUM = 2
-SPEED_INT_HIGH = 3
+SPEED_LOW = 1
+SPEED_MEDIUM = 2
+SPEED_HIGH = 3
 
-SPEED_STR_LOW = "low"
-SPEED_STR_MEDIUM = "mid"
-SPEED_STR_HIGH = "high"
-
-PRESET_NONE = "none"
-PRESET_NV = "natural_ventilation"
+PRESET_NONE = "None"
+PRESET_NV = "Natural"
 
 BRAND_PREFIX = "bestin"
 
 NEW_CLIMATE = "climates"
+NEW_NUMBER = "numbers"
 NEW_FAN = "fans"
 NEW_LIGHT = "lights"
 NEW_SENSOR = "sensors"
@@ -54,16 +50,14 @@ NEW_SWITCH = "switchs"
 
 MAIN_DEVICES: list[str] = [
     "fan",
-    "ventil",
-    "elevator:direction",
-    "elevator:floor",
+    "fan:timer",
     "gas",
-    "doorlock",
-    "elevator",
+    "doorlock"
 ]
 
 PLATFORM_SIGNAL_MAP = {
     Platform.CLIMATE.value: NEW_CLIMATE,
+    Platform.NUMBER.value: NEW_NUMBER,
     Platform.FAN.value: NEW_FAN,
     Platform.LIGHT.value: NEW_LIGHT,
     Platform.SENSOR.value: NEW_SENSOR,
@@ -71,44 +65,42 @@ PLATFORM_SIGNAL_MAP = {
 }
 
 DEVICE_PLATFORM_MAP = {
-    "temper": Platform.CLIMATE.value,
     "thermostat": Platform.CLIMATE.value,
+    "heatwater:set": Platform.NUMBER.value,
+    "hotwater:set": Platform.NUMBER.value,
     "fan": Platform.FAN.value,
-    "ventil": Platform.FAN.value,
+    "fan:timer": Platform.NUMBER.value,
     "light": Platform.LIGHT.value,
-    "light:dcvalue": Platform.SENSOR.value,
-    "smartlight": Platform.LIGHT.value,
-    "livinglight": Platform.LIGHT.value,
-    "outlet": Platform.SWITCH.value,
-    "outlet:cutvalue": Platform.SENSOR.value,
-    "outlet:standbycut": Platform.SWITCH.value,
-    "outlet:powercons": Platform.SENSOR.value,
-    "energy": Platform.SENSOR.value,
+    "dimming": Platform.LIGHT.value,
+    "light:powerusage": Platform.SENSOR.value,
+    "energy:totalusage": Platform.SENSOR.value,
+    "energy:realtimeusage": Platform.SENSOR.value,
+    "gas": Platform.SWITCH.value,
     "doorlock": Platform.SWITCH.value,
-    "elevator": Platform.SWITCH.value,
-    "elevator:direction": Platform.SENSOR.value,
-    "elevator:floor": Platform.SENSOR.value,
-    "electric": Platform.SWITCH.value,
-    "electric:standbycut": Platform.SWITCH.value,
-    "gas": Platform.SWITCH.value,    
+    "outlet": Platform.SWITCH.value,
+    "outlet:cutoffvalue": Platform.SENSOR.value,
+    "outlet:powerusage": Platform.SENSOR.value,
+    "outlet:standbycutoff": Platform.SWITCH.value,
 }
 
 @dataclass
 class DeviceInfo:
-    """Represents information about a device."""
-    device_type: str
-    name: str
-    room: str
-    state: Any
+    """Represents device information."""
     device_id: str
+    device_name: str
+    device_type: str
+    sub_type: str | None
+    room_id: str
+    sub_id: str | None
+    device_state: Any
 
 @dataclass
-class DeviceProfile:
-    """Manages device profiles, including callbacks and command handling."""
-    enqueue_command: Callable[..., None]
+class Device:
+    """Represents a device."""
+    set_command: Callable[..., None]
     domain: str
     unique_id: str
-    info: DeviceInfo
+    dev_info: DeviceInfo
     callbacks: Set[Callable[..., None]] = field(default_factory=set)
 
     def add_callback(self, callback: Callable[..., None]) -> None:
@@ -119,8 +111,8 @@ class DeviceProfile:
         """Removes a callback from the set of callbacks."""
         self.callbacks.discard(callback)
     
-    def update_callbacks(self) -> None:
-        """Calls all registered callbacks."""
+    def update_callback(self) -> None:
+        """Calls all callbacks."""
         for callback in self.callbacks:
             assert callable(callback), "Callback should be callable"
             callback()
