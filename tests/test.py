@@ -24,7 +24,7 @@ class Communicator:
         self.last_reconnect_attempt = None
         self.next_attempt_time = None
 
-        self.chunk_size = 1024
+        self.chunk_size = 128
         self._parse_conn_str()
 
     def _parse_conn_str(self):
@@ -121,6 +121,7 @@ class DeviceType(StrEnum):
     EC = "ec"
     FAN = "fan"
     GAS = "gas"
+    IAQ = "iaq"
     ELEVATOR = "elevator"
     ENERGY = "energy"
     IGNORE = "ignore"
@@ -139,12 +140,29 @@ class EnergyType(StrEnum):
     GAS = "gas"
     HEAT = "heat"
 
+class EnergyMetric(StrEnum):
+    """Enum for energy metrics."""
+    TOTAL = "total"
+    REALTIME = "realtime"
+
 INT_TO_ENERGY_TYPE = {
     0x1: EnergyType.ELECTRIC,
     0x2: EnergyType.WATER,
     0x3: EnergyType.HOTWATER,
     0x4: EnergyType.GAS,
     0x5: EnergyType.HEAT
+}
+
+ENERGY_ID_TO_VALUE = {
+    (EnergyType.ELECTRIC, EnergyMetric.TOTAL): lambda val, _: round(val / 100, 2),
+    (EnergyType.GAS, EnergyMetric.TOTAL): lambda val, _: round(val / 1000, 2),
+    (EnergyType.GAS, EnergyMetric.REALTIME): lambda val, _: val / 10,
+    (EnergyType.HEAT, EnergyMetric.TOTAL): lambda val, _: round(val / 1000, 2),
+    (EnergyType.HEAT, EnergyMetric.REALTIME): lambda val, cnt: val if cnt == 5 else val / 1000,
+    (EnergyType.HOTWATER, EnergyMetric.TOTAL): lambda val, _: round(val / 1000, 2),
+    (EnergyType.HOTWATER, EnergyMetric.REALTIME): lambda val, cnt: val if cnt == 5 else val / 1000,
+    (EnergyType.WATER, EnergyMetric.TOTAL): lambda val, _: round(val / 1000, 2),
+    (EnergyType.WATER, EnergyMetric.REALTIME): lambda val, cnt: val if cnt == 5 else val / 1000,
 }
 
 @dataclass
@@ -158,20 +176,20 @@ class Packet:
     
     def __str__(self) -> str:
         """Return a string representation of the packet."""
-        return f"Device: {self.device_type}, Type: {self.packet_type}, Seq: {self.seq_number}, Data: {self.data}, Valid: {self.is_valid}"
+        return f"Packet(device_type={self.device_type}, packet_type={self.packet_type}, seq_number={self.seq_number}, data={self.data}, is_valid={self.is_valid})"
 
 @dataclass
 class DevicePacket:
     """Class to represent a device packet."""
-    trans_key: str
+    device_type: str
     room_id: int | str
     sub_id: str | None
     device_state: Any
 
     def __str__(self) -> str:
         """Return a string representation of the device packet."""
-        return f"Key: {self.trans_key}, Room: {self.room_id}, Sub: {self.sub_id}, State: {self.device_state}"
-    
+        return f"DevicePacket(device_type={self.device_type}, room_id={self.room_id}, sub_id={self.sub_id}, device_state={self.device_state})"
+
 class PacketParser:
     """"Class to parse packets."""
 
@@ -181,6 +199,7 @@ class PacketParser:
         0x41: DeviceType.IGNORE,
         0x42: DeviceType.IGNORE,
         0x61: DeviceType.FAN,
+        0xB1: DeviceType.IAQ,
         0xC1: DeviceType.ELEVATOR,
         0xD1: DeviceType.ENERGY,
     }
@@ -245,7 +264,10 @@ class PacketParser:
         for byte in data[:-1]:
             checksum ^= byte
             checksum = (checksum + 1) & 0xFF
-        return checksum == data[-1]
+        if checksum != data[-1]:
+            logging.warning(f"Checksum validation failed: calculated={checksum:#04x}, expected={data[-1]:#04x}, data={data.hex()}")
+            return False
+        return True
             
     def parse_single_packet(self, start_idx: int) -> tuple[Packet | None, int]:
         """Parse a single packet starting from the given index."""
@@ -270,6 +292,9 @@ class PacketParser:
         
         packet_data = self.data[start_idx:start_idx + length]
         is_valid = self.check_checksum(packet_data)
+        if not is_valid:
+            return None, start_idx + length
+        
         return Packet(device_type, packet_type, seq_number, packet_data, is_valid), start_idx + length
     
     def get_packet_info(self, length: int, start_idx: int) -> tuple[PacketType, int]:
@@ -340,46 +365,60 @@ class DevicePacketParser:
         except Exception as e:
             logging.error(f"Error parsing {self.device_type.value} packet({e}): {self.data.hex()}")
             return None
-
-    def parse_energy(self) -> list[DevicePacket]:
+    
+    def parse_iaq(self) -> list[DevicePacket]:
+        """Parse the packet data for IAQ devices."""
+ 
+    def parse_energy(self) -> list[DevicePacket] | list:
         """Parse the packet data for energy devices."""
         device_packets = []
+        data_length = len(self.data)
         start_idx = 7
-        repeat_cnt = (len(self.data) - 8) // 8 
-        
-        for _ in range(repeat_cnt):
-            id = self.data[start_idx]
-            increment = 10 if (id & 0xF0) == 0x80 else 8
 
-            energy_type = INT_TO_ENERGY_TYPE.get(id & 0x0F)
+        if data_length == 34:
+            repeat_count = 3
+        elif data_length == 48:
+            repeat_count = 5
+        else:
+            logging.error(f"Unexpected data length ({data_length}) for energy packet: {self.data.hex()}")
+            return device_packets
+        
+        for count in range(repeat_count):
+            energy_int = self.data[start_idx]
+            increment = 9 if repeat_count == 3 and count > 0 else 8
+
+            energy_type = INT_TO_ENERGY_TYPE.get(energy_int & 0x0F)
             if energy_type is None:
                 logging.warning(f"Unknown energy type for ID: {id & 0x0F}")
+                start_idx += increment
                 continue
-
-            device_packet = DevicePacket(
-                trans_key=DeviceType.ENERGY.value,
-                room_id=energy_type.value,
-                sub_id=None,
-                device_state={
-                    "today_usage": self.data[start_idx + 1],
-                    "yesterday_usage": self.data[start_idx + 2],
-                    "generation_usage": self.data[start_idx + 3],
-                    "average_usage": self.data[start_idx + 4],
-                    "realtime_usage": int.from_bytes(
-                        self.data[start_idx + 6:start_idx + 8], byteorder="big"
+            
+            data_mapping = {
+                EnergyMetric.TOTAL: float(self.data[start_idx + 1:start_idx + 5].hex()),
+                EnergyMetric.REALTIME: int(self.data[start_idx + 6:start_idx + 8].hex()),
+            }
+            for sub_id, device_state in data_mapping.items():
+                device_packet = DevicePacket(
+                    device_type=DeviceType.ENERGY.value,
+                    room_id=energy_type.value,
+                    sub_id=sub_id.value,
+                    device_state=ENERGY_ID_TO_VALUE.get((energy_type, sub_id), lambda val, _: val)(
+                        device_state, repeat_count
                     ),
-                }
-            )
-            device_packets.append(device_packet)
+                )
+                device_packets.append(device_packet)
             start_idx += increment
-
+            
         return device_packets
     
     def parse_fan(self) -> DevicePacket:
         """Parse the packet data for a fan."""
+        if len(self.data) != 10:
+            logging.error(f"Unexpected data length ({len(self.data)}) for fan packet: {self.data.hex()}")
+            return None
         return DevicePacket(
-            trans_key=DeviceType.FAN.value,
-            room_id=self.data[4],
+            device_type=DeviceType.FAN.value,
+            room_id=str(self.data[4]),
             sub_id=None,
             device_state={
                 "state": bool(self.data[5] & 0x01),
@@ -388,23 +427,48 @@ class DevicePacketParser:
             }
         )
     
-    def parse_gas(self) -> DevicePacket:
+    def parse_gas(self) -> DevicePacket | None:
         """""Parse the packet data for a gas."""
+        if len(self.data) != 10:
+            logging.error(f"Unexpected data length ({len(self.data)}) for gas packet: {self.data.hex()}")
+            return None
         return DevicePacket(
-            trans_key=DeviceType.GAS.value,
-            room_id=self.data[4],
+            device_type=DeviceType.GAS.value,
+            room_id=str(self.data[4]),
             sub_id=None,
             device_state=bool(self.data[5])
         )
 
-    def parse_thermostat(self) -> list[DevicePacket]:
+    def parse_thermostat(self) -> list[DevicePacket] | list:
         """Parse the packet data for thermostat devices."""
         device_packets = []
-        
-        if len(self.data) == 16:
+        data_length = len(self.data)
+
+        if data_length == 14:
             device_packets.append(DevicePacket(
-                trans_key=DeviceType.THERMOSTAT.value,
-                room_id=self.data[5] & 0x0F,
+                device_type="heatwater",
+                room_id=str(self.data[5]),
+                sub_id="set",
+                device_state={
+                    "min_temp": self.data[6],
+                    "max_temp": self.data[7],
+                    "set_value": self.data[8],
+                }
+            ))
+            device_packets.append(DevicePacket(
+                device_type="hotwater",
+                room_id=str(self.data[5]),
+                sub_id="set",
+                device_state={
+                    "min_temp": self.data[9],
+                    "max_temp": self.data[10],
+                    "set_value": self.data[11],
+                }
+            ))
+        elif data_length == 16:
+            device_packets.append(DevicePacket(
+                device_type=DeviceType.THERMOSTAT.value,
+                room_id=str(self.data[5] & 0x0F),
                 sub_id=None,
                 device_state={
                     "state": bool(self.data[6] & 0x01),
@@ -412,56 +476,14 @@ class DevicePacketParser:
                     "cur_temperature": int.from_bytes(self.data[8:10], byteorder='big') / 10.0,
                 }
             ))
-            device_packets.append(DevicePacket(
-                trans_key="",
-                room_id=self.data[5] & 0x0F,
-                sub_id="",
-                device_state=self.data[11],
-            ))
-            device_packets.append(DevicePacket(
-                trans_key="",
-                room_id=self.data[5] & 0x0F,
-                sub_id="",
-                device_state=self.data[12],
-            ))
-            device_packets.append(DevicePacket(
-                trans_key="",
-                room_id=self.data[5] & 0x0F,
-                sub_id="",
-                device_state=self.data[13],
-            ))
-            device_packets.append(DevicePacket(
-                trans_key="",
-                room_id=self.data[5] & 0x0F,
-                sub_id="",
-                device_state=self.data[14],
-            ))
-        elif len(self.data) == 14:
-            device_packets.append(DevicePacket(
-                trans_key="heating_water",
-                room_id=None,
-                sub_id=None,
-                device_state={
-                    "water_min": self.data[6],
-                    "water_max": self.data[7],
-                    "water_set": self.data[8],
-                }
-            ))
-            device_packets.append(DevicePacket(
-                trans_key="hot_water",
-                room_id=None,
-                sub_id=None,
-                device_state={
-                    "water_min": self.data[9],
-                    "water_max": self.data[10],
-                    "water_set": self.data[11],
-                }
-            ))
+        else:
+            logging.error(f"Unexpected data length ({len(self.data)}) for thermostat packet: {self.data.hex()}")
+            
         return device_packets
 
 
 if __name__ == "__main__":
-    comm = Communicator(":8899")
+    comm = Communicator("192.168.0.27:8899")
     comm.connect()
 
     while True:
@@ -469,7 +491,13 @@ if __name__ == "__main__":
         packets = PacketParser.parse(receive)
         for packet in packets:
             if packet.packet_type == PacketType.RES:
+                if packet.device_type == None:
+                    print(' '.join(f'{byte:02X}' for byte in packet.data))
+                
                 parse_data = DevicePacketParser(packet).parse()
                 if parse_data is not None:
-                    #print(' '.join(f'{byte:02X}' for byte in packet.data))
-                    print(parse_data)
+                    if isinstance(parse_data, list):
+                        for device_data in parse_data:
+                            print(device_data)
+                    else:
+                        print(parse_data)
