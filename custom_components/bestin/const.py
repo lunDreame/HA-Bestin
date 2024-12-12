@@ -73,6 +73,8 @@ DEVICE_PLATFORM_MAP = {
     "light": Platform.LIGHT.value,
     "dimming": Platform.LIGHT.value,
     "light:powerusage": Platform.SENSOR.value,
+    "dimming:powerusage": Platform.SENSOR.value,
+    "dimming:cumulativeusage": Platform.SENSOR.value,
     "energy:totalusage": Platform.SENSOR.value,
     "energy:realtimeusage": Platform.SENSOR.value,
     "gas": Platform.SWITCH.value,
@@ -80,6 +82,7 @@ DEVICE_PLATFORM_MAP = {
     "outlet": Platform.SWITCH.value,
     "outlet:cutoffvalue": Platform.SENSOR.value,
     "outlet:powerusage": Platform.SENSOR.value,
+    "outlet:cumulativeusage": Platform.SENSOR.value,
     "outlet:standbycutoff": Platform.SWITCH.value,
 }
 

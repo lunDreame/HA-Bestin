@@ -26,7 +26,10 @@ from .const import NEW_SENSOR
 
 DEVICE_ICON = {
     "light:powerusage": "mdi:flash",
+    "dimming:powerusage": "mdi:flash",
+    "dimming:cumulativeusage": "mdi:flash",
     "outlet:powerusage": "mdi:flash",
+    "outlet:cumulativeusage": "mdi:flash",
     "outlet:cutoffvalue": "mdi:lightning-bolt",
     "electric:realtimeusage": "mdi:flash",
     "electric:totalusage": "mdi:lightning-bolt",
@@ -42,7 +45,10 @@ DEVICE_ICON = {
 
 DEVICE_CLASS = {
     "light:powerusage": SensorDeviceClass.POWER,
+    "dimming:powerusage": SensorDeviceClass.POWER,
+    "dimming:cumulativeusage": SensorDeviceClass.ENERGY,
     "outlet:powerusage": SensorDeviceClass.POWER,
+    "outlet:cumulativeusage": SensorDeviceClass.ENERGY,
     "outlet:cutoffvalue": SensorDeviceClass.POWER,
     "electric:realtimeusage": SensorDeviceClass.POWER,
     "electric:totalusage": SensorDeviceClass.ENERGY,
@@ -52,7 +58,10 @@ DEVICE_CLASS = {
 
 DEVICE_UNIT = {
     "light:powerusage": UnitOfPower.WATT,
+    "dimming:powerusage": UnitOfPower.WATT,
+    "dimming:cumulativeusage": UnitOfEnergy.KILO_WATT_HOUR,
     "outlet:powerusage": UnitOfPower.WATT,
+    "outlet:cumulativeusage": UnitOfEnergy.KILO_WATT_HOUR,
     "outlet:cutoffvalue": UnitOfPower.WATT,
     "electric:realtimeusage": UnitOfPower.WATT,
     "electric:totalusage": UnitOfEnergy.KILO_WATT_HOUR,

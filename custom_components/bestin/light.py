@@ -10,6 +10,7 @@ from homeassistant.components.light import (
     LightEntity,
 )
 
+from homeassistant.const import ATTR_STATE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -74,7 +75,10 @@ class BestinLight(BestinDevice, LightEntity):
     @property
     def is_on(self) -> bool:
         """Return true if switch is on."""
-        return self._dev_info.device_state
+        device_state = self._dev_info.device_state
+        if isinstance(device_state, dict):
+            return device_state[ATTR_STATE]
+        return device_state
 
     @property
     def brightness(self) -> Optional[int]:

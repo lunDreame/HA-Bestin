@@ -18,7 +18,7 @@ from .const import NEW_SWITCH
 
 
 DEVICE_ICON = {
-    "outlet": "mdi:power-socket",
+    "outlet": "mdi:power-socket-eu",
     "outlet:standbycutoff": "mdi:power-sleep",
     "doorlock": "mdi:door-closed",
     "gas": "mdi:valve",

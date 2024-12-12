@@ -53,10 +53,10 @@ class BestinController:
         self.queue: list[dict] = []
         self.tasks: list[asyncio.Task] = []
         self.send_retry: int = 10
-        self.delay_9600: list[float] = [0.01, 0.03, 0.07, 0.15, 0.3]
-        self.delay_38400: list[float] = [0.005, 0.01, 0.02, 0.04, 0.08]
-        self.tx_wait_time = 0.05
-        self.min_wait_time = 0.05
+        self.delay_9600 = [0.005, 0.01, 0.02, 0.04, 0.08]
+        self.delay_38400 = [0.002, 0.005, 0.01, 0.02, 0.04]
+        self.tx_wait_time = 0.02
+        self.min_wait_time = 0.01
 
     async def start(self) -> None:
         """Start the tasks."""
@@ -80,7 +80,7 @@ class BestinController:
             return True
         return True
     
-    async def receive_data(self, size: int = 256) -> bytes | None:
+    async def receive_data(self, size: int = 1024) -> bytes | None:
         """Return the receive data."""
         if self.available:
             return await self.connection.receive(size)
@@ -244,7 +244,7 @@ class BestinController:
             sub_id=que_data.get(SUB_ID),
             value=que_data.get(VALUE),
             seq_number=que_data.get(SEQ_NUMBER),
-        ).create()
+        ).create_packet()
 
         if command_packet is None:
             LOGGER.warning("Failed to create command packet.")
@@ -278,7 +278,7 @@ class BestinController:
             return
         
         delay_index = min(que_data[SEND_RETRY] - 1, len(retry_delays) - 1)
-        current_delay = max(retry_delays[delay_index] * (1.2 ** que_data[SEND_RETRY]), self.min_wait_time)
+        current_delay = max(retry_delays[delay_index] * (1.1 ** que_data[SEND_RETRY]), self.min_wait_time)
         await asyncio.sleep(current_delay)
 
         if que_data[SEND_RETRY] < self.send_retry:

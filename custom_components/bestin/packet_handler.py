@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 from homeassistant.const import ATTR_STATE, WIND_SPEED
+from homeassistant.components.light import ATTR_BRIGHTNESS, ATTR_COLOR_TEMP
 from homeassistant.components.climate.const import SERVICE_SET_TEMPERATURE, ATTR_CURRENT_TEMPERATURE
 from homeassistant.components.number import ATTR_MIN, ATTR_MAX, ATTR_STEP
 
@@ -83,12 +84,15 @@ class BasePacket:
 
     HEADER_BYTES: dict[int, DeviceType | tuple[DeviceType, DeviceType | None]] = {
         0x28: DeviceType.THERMOSTAT,
+        0x30: DeviceType.IGNORE,
         0x31: (DeviceType.GAS, DeviceType.EC),
-        0x32: (DeviceType.IGNORE, DeviceType.EC),
+        0x32: DeviceType.IGNORE,
         0x41: (DeviceType.DOORLOCK, DeviceType.IGNORE),
         0x42: DeviceType.IGNORE,
         0x61: DeviceType.FAN,
-        0xB1: DeviceType.IAQ,
+        0xB1: DeviceType.IGNORE,
+        0xB2: DeviceType.IGNORE,
+        0xB3: DeviceType.IGNORE,
         0xC1: DeviceType.ELEVATOR,
         0xD1: DeviceType.ENERGY,
     }
@@ -118,35 +122,48 @@ class BasePacket:
 
     def is_ec_condition(self, header_byte: int) -> bool:
         """Check if the header byte matches EC conditions."""
-        upper_4bits = (header_byte >> 4) & 0xF
-        lower_4bits = header_byte & 0xF
-        return 1 <= upper_4bits <= 9 and (1 <= lower_4bits <= 6 or lower_4bits == 0xF)
+        upper_nibble, lower_nibble = header_byte >> 4, header_byte & 0x0F
+        if upper_nibble == 0x3:
+            return lower_nibble == 0xF or 0x1 <= lower_nibble <= 0x5
+        elif upper_nibble == 0x5:
+            return 0x1 <= lower_nibble <= 0x5
+        return False
 
     def get_device_type(self, header_byte: int, start_idx: int) -> DeviceType | None:
         """Determine device type based on header byte and packet type."""
         device_type = self.HEADER_BYTES.get(header_byte)
-
+        packet_type = self.packet[start_idx + 2]
+        is_fixed = packet_type in {0x00, 0x80, 0x02, 0x82}
+        
         if isinstance(device_type, tuple):
-            device_type_idx = 0 if self.packet[start_idx + 2] in {0x00, 0x80, 0x02, 0x82} else 1
-            return device_type[device_type_idx]
-        if device_type is None and self.is_ec_condition(header_byte):
-            return DeviceType.EC
-
+            return device_type[0] if is_fixed else device_type[1]
+        if device_type is None or (
+            device_type == DeviceType.IGNORE and not is_fixed
+        ):
+            if self.is_ec_condition(header_byte):
+                return DeviceType.EC
+            
         return device_type
-
-    def get_packet_info(self, length: int, start_idx: int) -> tuple[PacketType, int]:
+    
+    def get_packet_info(self, start_idx: int, device_type: DeviceType, length: int) -> tuple[PacketType, int]:
         """Determine packet type and sequence number."""
         packet_byte = self.packet[start_idx + (2 if length == 10 else 3)]
         seq_number = self.packet[start_idx + (3 if length == 10 else 4)]
-
-        if packet_byte in {0x00, 0x01, 0x02, 0x11, 0x21}:
-            return PacketType.QUERY, seq_number
-        if packet_byte in {0x80, 0x82, 0x91, 0xA1, 0xB1}:
-            return PacketType.RESPONSE, seq_number
-
-        #LOGGER.debug(f"Unknown packet type: {hex(packet_byte)}")
+        
+        if device_type == DeviceType.EC:
+            if packet_byte in {0x01, 0x12, 0x03, 0x31, 0x11, 0x06, 0x05, 0x02}:
+                return PacketType.QUERY, seq_number
+            elif packet_byte in {0x81, 0x92, 0x83, 0xB1, 0x91, 0x86, 0x85, 0x82}:
+                return PacketType.RESPONSE, seq_number
+        else:
+            if packet_byte in {0x00, 0x21, 0x02, 0x01, 0x11, 0x05}:
+                return PacketType.QUERY, seq_number
+            elif packet_byte in {0x80, 0xA1, 0x82, 0x81, 0x91, 0x85}:
+                return PacketType.RESPONSE, seq_number
+            
+        LOGGER.debug(f"Packet type: {hex(packet_byte)}, {self.packet.hex()}")
         return PacketType.PROMPT, seq_number
-
+    
     def parse_single_packet(self, start_idx: int) -> tuple[Packet | None, int]:
         """Parse a single packet."""
         if start_idx + 3 > len(self.packet) or self.packet[start_idx] != 0x02:
@@ -160,9 +177,9 @@ class BasePacket:
             return None, len(self.packet)
 
         packet_data = self.packet[start_idx:start_idx + length]
-        packet_type, seq_number = self.get_packet_info(length, start_idx)
+        packet_type, seq_number = self.get_packet_info(start_idx, device_type, length)
         return BasePacket.Packet(device_type, packet_type, seq_number, packet_data), start_idx + length
-
+    
     def parse_packets(self) -> list[Packet]:
         """Parse all packets in the packet."""
         packets = []
@@ -207,11 +224,11 @@ class DevicePacket:
             if self.device_type is None:
                 LOGGER.error(f"Unknown device type at {self.data[1]:#x}: {self.data.hex()}")
                 return None
-            device_parse = getattr(self, f"parse_{self.device_type.value}", None)
-            if device_parse is None:
+            parse_method = getattr(self, f"parse_{self.device_type.value}", None)
+            if parse_method is None:
                 LOGGER.error(f"Device parsing method not found for {self.device_type.value}")
                 return None
-            return device_parse()
+            return parse_method()
         except Exception as e:
             LOGGER.error(f"Error parsing {self.device_type.value} packet({e}): {self.data.hex()}")
             return None
@@ -223,14 +240,18 @@ class DevicePacket:
         ec_type: EcType = None
 
         if self.data[1] & 0xF0 == 0x30 and data_length != 30:
-            device_infos.extend(self.parse_ec_3())
             ec_type = EcType.EC3
+            parse_method = getattr(self, f"parse_ec3_{self.data[3]:x}", None)
+            if parse_method is None:
+                LOGGER.debug(f"No response packet {self.data[3]:#x} parsing method found for EC type 3: {self.data.hex()}")
+                return []
+            device_infos.extend(parse_method())
         elif self.data[1] & 0xF0 == 0x50:
-            device_infos.extend(self.parse_ec_5())
             ec_type = EcType.EC5
+            device_infos.extend(self.parse_ec_5())
         elif self.data[5] & 0xF0 == 0xE0 and data_length == 30:
-            device_infos.extend(self.parse_ec_e())
             ec_type = EcType.ECE
+            device_infos.extend(self.parse_ec_e())
         else:
             LOGGER.error(f"Unknown EC packet type at {self.data[1]:#x}: {self.data.hex()}")
         
@@ -242,6 +263,104 @@ class DevicePacket:
             
         return device_infos
     
+    def parse_ec3_91(self) -> list[DeviceInfo]:
+        """Parse the packet data for EC 3 0x91 devices."""
+        device_infos = []
+
+        # Variables
+        lc = self.data[10] & 0xF          # Light count
+        oc = self.data[11]                # Outlet count
+        lb = (self.data[10] >> 4) == 0x4  # Light block
+        lbc = lc + 1 if lb else lc        # Light block count
+
+        # Define light_idx after lbc is calculated
+        light_idx = 17
+        outlet_idx = light_idx + lbc * 13  # Start index
+
+        for _ in range(lc):
+            lidx = self.data[light_idx]
+            if lidx >> 4 == 0x8:
+                LOGGER.debug(f"Light {self.data[1] & 0xF}-{lidx & 0xF} is a block light")
+                light_idx += 13
+                continue
+
+            device_infos.extend([
+                DevicePacket.DeviceInfo(
+                    device_type=DeviceType.DIMMING.value,
+                    room_id=str(self.data[1] & 0xF),
+                    sub_id=str(lidx & 0xF),
+                    device_state={
+                        ATTR_STATE: self.data[light_idx + 1] == 0x01,
+                        ATTR_BRIGHTNESS: self.data[light_idx + 2],
+                        ATTR_COLOR_TEMP: self.data[light_idx + 3],
+                    }
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.DIMMING.value}:powerusage",
+                    room_id=str(self.data[1] & 0xF),
+                    sub_id="power usage",
+                    device_state=int.from_bytes(self.data[12:14], 'big') / 10.0
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.DIMMING.value}:cumulativeusage",
+                    room_id=str(self.data[1] & 0xF),
+                    sub_id="cumulative usage",
+                    device_state=int.from_bytes(self.data[14:17], 'big')
+                ),
+            ])
+            light_idx += 13
+
+        for _ in range(oc):
+            oidx = self.data[outlet_idx]
+            if oidx >> 4 == 0x8:
+                LOGGER.debug(f"Outlet {self.data[1] & 0xF}-{oidx & 0xF} is a block outlet")
+                outlet_idx += 14
+                continue
+
+            device_infos.extend([
+                DevicePacket.DeviceInfo(
+                    device_type=DeviceType.OUTLET.value,
+                    room_id=str(self.data[1] & 0x0F),
+                    sub_id=str(oidx & 0xF),
+                    device_state=bool(self.data[outlet_idx + 1] & 0x1)
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.OUTLET.value}:standbycutoff",
+                    room_id=str(self.data[1] & 0x0F),
+                    sub_id=f"standby cutoff {str(oidx & 0xF)}",
+                    device_state=bool(self.data[outlet_idx + 1] & 0x10)
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.OUTLET.value}:cutoffvalue",
+                    room_id=str(self.data[1] & 0x0F),
+                    sub_id=f"cutoff value {str(oidx & 0xF)}",
+                    device_state=int.from_bytes(self.data[outlet_idx + 7:outlet_idx + 9], 'big') / 10.0
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.OUTLET.value}:powerusage",
+                    room_id=str(self.data[1] & 0x0F),
+                    sub_id=f"power usage {str(oidx & 0xF)}",
+                    device_state=(
+                        int.from_bytes(self.data[outlet_idx + 9:outlet_idx + 11], 'big') / 10.0
+                        if oidx % 2 == 0 else
+                        int.from_bytes(self.data[outlet_idx + 2:outlet_idx + 4], 'big') / 10.0
+                    )
+                ),
+                DevicePacket.DeviceInfo(
+                    device_type=f"{DeviceType.OUTLET.value}:cumulativeusage",
+                    room_id=str(self.data[1] & 0x0F),
+                    sub_id=f"cumulative usage {str(oidx & 0xF)}",
+                    device_state=(
+                        int.from_bytes(self.data[outlet_idx + 11:outlet_idx + 14], 'big')
+                        if oidx % 2 == 0 else
+                        int.from_bytes(self.data[outlet_idx + 4:outlet_idx + 7], 'big')
+                    )
+                ),
+            ])
+            outlet_idx += 14
+
+        return device_infos
+    
     def parse_ec_5(self) -> list[DeviceInfo]:
         """Parse the packet data for EC 5 devices."""
         device_infos = []
@@ -249,7 +368,7 @@ class DevicePacket:
         for i in range(self.data[5]):
             device_infos.append(DevicePacket.DeviceInfo(
                 device_type=DeviceType.LIGHT.value,
-                room_id=str(self.data[1] & 0x0F),
+                room_id=str(self.data[1] & 0xF),
                 sub_id=str(i),
                 device_state=bool(self.data[6] & (1 << i))
             ))
@@ -259,20 +378,20 @@ class DevicePacket:
             device_infos.extend([
                 DevicePacket.DeviceInfo(
                     device_type=DeviceType.OUTLET.value,
-                    room_id=str(self.data[1] & 0x0F),
+                    room_id=str(self.data[1] & 0xF),
                     sub_id=str(i),
                     device_state=self.data[base_index] in {0x21, 0x11}
                 ),
                 DevicePacket.DeviceInfo(
                     device_type=f"{DeviceType.OUTLET.value}:powerusage",
-                    room_id=str(self.data[1] & 0x0F),
+                    room_id=str(self.data[1] & 0xF),
                     sub_id=f"power usage {str(i)}",
                     device_state=int.from_bytes(
-                        self.data[base_index + 1:base_index + 3], 'big') / 10
+                        self.data[base_index + 1:base_index + 3], 'big') / 10.0
                 ),
                 DevicePacket.DeviceInfo(
                     device_type=f"{DeviceType.OUTLET.value}:standbycutoff",
-                    room_id=str(self.data[1] & 0x0F),
+                    room_id=str(self.data[1] & 0xF),
                     sub_id=f"standby cutoff {str(i)}",
                     device_state=self.data[base_index] in {0x11, 0x13, 0x12}
                 )
@@ -283,7 +402,7 @@ class DevicePacket:
         """Parse the packet data for EC E devices."""
         device_infos = []
 
-        if self.data[5] & 0x0F == 0x1:
+        if self.data[5] & 0xF == 0x1:
             li, oi = 4, 3    # Light Iteration, Outlet Iteration
         else:
             li, oi = 2, 2
@@ -291,34 +410,33 @@ class DevicePacket:
         for i in range(li):
             device_infos.append(DevicePacket.DeviceInfo(
                 device_type=DeviceType.LIGHT.value,
-                room_id=str(self.data[5] & 0x0F),
+                room_id=str(self.data[5] & 0xF),
                 sub_id=str(i),
                 device_state=bool(self.data[6] & (0x1 << i))
             ))
             device_infos.append(DevicePacket.DeviceInfo(
                 device_type=f"{DeviceType.LIGHT.value}:powerusage",
-                room_id=str(self.data[5] & 0x0F),
+                room_id=str(self.data[5] & 0xF),
                 sub_id="power usage",
-                device_state=int.from_bytes(self.data[12:14], byteorder='big') / 10
+                device_state=int.from_bytes(self.data[12:14], 'big') / 10.0
             ))
         for i in range(oi):
             device_infos.extend([
                 DevicePacket.DeviceInfo(
                     device_type=DeviceType.OUTLET.value,
-                    room_id=str(self.data[5] & 0x0F),
+                    room_id=str(self.data[5] & 0xF),
                     sub_id=str(i),
                     device_state=bool(self.data[7] & (0x1 << i))
                 ),
                 DevicePacket.DeviceInfo(
                     device_type=f"{DeviceType.OUTLET.value}:powerusage",
-                    room_id=str(self.data[5] & 0x0F),
+                    room_id=str(self.data[5] & 0xF),
                     sub_id=f"power usage {str(i)}",
-                    device_state=int.from_bytes(
-                        self.data[14 + 2 * i: 16 + 2 * i], byteorder='big') / 10
+                    device_state=int.from_bytes(self.data[14 + 2 * i: 16 + 2 * i], 'big') / 10.0
                 ),
                 DevicePacket.DeviceInfo(
                     device_type=f"{DeviceType.OUTLET.value}:standbycutoff",
-                    room_id=str(self.data[5] & 0x0F),
+                    room_id=str(self.data[5] & 0xF),
                     sub_id=f"standby cutoff",
                     device_state=bool(self.data[7] >> 4 & 1)
                 ),
@@ -326,10 +444,9 @@ class DevicePacket:
             if i <= 1:
                 device_infos.append(DevicePacket.DeviceInfo(
                     device_type=f"{DeviceType.OUTLET.value}:cutoffvalue",
-                    room_id=str(self.data[5] & 0x0F),
+                    room_id=str(self.data[5] & 0xF),
                     sub_id=f"cutoff value {str(i)}",
-                    device_state=int.from_bytes(
-                        self.data[8 + 2 * i: 10 + 2 * i], byteorder='big') / 10
+                    device_state=int.from_bytes(self.data[8 + 2 * i: 10 + 2 * i], 'big') / 10.0
                 ))
 
         return device_infos
@@ -341,17 +458,17 @@ class DevicePacket:
         
         for _ in range(self.data[6]):
             energy_id = self.data[start_idx]
-            increment = 1 if (energy_id >> 4) & 0xF == 0x8 else 8
+            increment = 1 if energy_id >> 4 == 0x8 else 8
 
             if increment == 1:
-                LOGGER.debug(f"Energy ID {energy_id & 0x0F} is not active, skipping...")
+                LOGGER.debug(f"Energy ID {energy_id & 0xF} is not active, skipping...")
                 start_idx += increment
                 continue
             
             try:
-                energy_type = EnergyType(energy_id & 0x0F)
+                energy_type = EnergyType(energy_id & 0xF)
             except ValueError:
-                LOGGER.warning(f"Unknown energy type {energy_id & 0x0F}, skipping...")
+                LOGGER.warning(f"Unknown energy type {energy_id & 0xF}, skipping...")
                 start_idx += increment
                 continue
 
@@ -384,7 +501,7 @@ class DevicePacket:
         device_infos = []
         
         if len(self.data) != 10:
-            LOGGER.error(f"Unexpected packet length ({len(self.data)}) for fan packet: {self.data.hex()}")
+            LOGGER.warning(f"Unexpected packet length ({len(self.data)}) for fan packet: {self.data.hex()}")
             return None
         
         device_infos.append(DevicePacket.DeviceInfo(
@@ -413,7 +530,7 @@ class DevicePacket:
     def parse_gas(self) -> DeviceInfo:
         """""Parse the packet data for a gas."""
         if len(self.data) != 10:
-            LOGGER.error(f"Unexpected packet length ({len(self.data)}) for gas packet: {self.data.hex()}")
+            LOGGER.warning(f"Unexpected packet length ({len(self.data)}) for gas packet: {self.data.hex()}")
             return None
         return DevicePacket.DeviceInfo(
             device_type=DeviceType.GAS.value,
@@ -425,7 +542,7 @@ class DevicePacket:
     def parse_doorlock(self) -> DeviceInfo:
         """Parse the packet data for a doorlock."""
         if len(self.data) != 10:
-            LOGGER.error(f"Unexpected packet length ({len(self.data)}) for doorlock packet: {self.data.hex()}")
+            LOGGER.warning(f"Unexpected packet length ({len(self.data)}) for doorlock packet: {self.data.hex()}")
             return None
         return DevicePacket.DeviceInfo(
             device_type=DeviceType.DOORLOCK.value,
@@ -465,16 +582,16 @@ class DevicePacket:
         elif data_length == 16:
             device_infos.append(DevicePacket.DeviceInfo(
                 device_type=DeviceType.THERMOSTAT.value,
-                room_id=str(self.data[5] & 0x0F),
+                room_id=str(self.data[5] & 0xF),
                 sub_id=None,
                 device_state={
-                    ATTR_STATE: bool(self.data[6] & 0x01),
+                    ATTR_STATE: bool(self.data[6] & 0x1),
                     SERVICE_SET_TEMPERATURE: (self.data[7] & 0x3F) + (self.data[7] & 0x40 > 0) * 0.5,
-                    ATTR_CURRENT_TEMPERATURE: int.from_bytes(self.data[8:10], byteorder='big') / 10.0,
+                    ATTR_CURRENT_TEMPERATURE: int.from_bytes(self.data[8:10], 'big') / 10.0,
                 }
             ))
         else:
-            LOGGER.debug(f"Unexpected packet length ({len(self.data)}) for thermostat packet: {self.data.hex()}")
+            LOGGER.warning(f"Unexpected packet length ({len(self.data)}) for thermostat packet: {self.data.hex()}")
 
         return device_infos
     
